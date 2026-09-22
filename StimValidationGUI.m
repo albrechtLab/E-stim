@@ -55,70 +55,111 @@ function StimValidationGUI()
 
     %% --- LEFT PANEL ---------------------------------------------------
     leftPanel = uipanel(gl,'Title','Control','FontWeight','bold');
+    leftPanel.Layout.Row    = 1;
+    leftPanel.Layout.Column = 1;
+
     lg = uigridlayout(leftPanel,[14 2]);
     lg.RowHeight   = {30,30,30,30,30,30,30,22,22,22,22,30,30,'1x'};
     lg.ColumnWidth = {'1x','1x'};
 
-    % -- Settings file row
-    uilabel(lg,'Text','Settings file:','FontWeight','bold',...
-        'Layout',struct('Row',1,'Column',1));
-    btnFile = uibutton(lg,'Text','Browse…','Layout',struct('Row',1,'Column',2),...
-        'ButtonPushedFcn',@browseFile);
+    % Row 1: Settings file label + browse button
+    lblSettings = uilabel(lg,'Text','Settings file:','FontWeight','bold');
+    lblSettings.Layout.Row    = 1;
+    lblSettings.Layout.Column = 1;
+    btnFile = uibutton(lg,'Text','Browse...','ButtonPushedFcn',@browseFile);
+    btnFile.Layout.Row    = 1;
+    btnFile.Layout.Column = 2;
 
-    fileLabel = uilabel(lg,'Text','(none)','WordWrap','on',...
-        'Layout',struct('Row',2,'Column',[1 2]));
+    % Row 2: selected file path
+    fileLabel = uilabel(lg,'Text','(none)','WordWrap','on');
+    fileLabel.Layout.Row    = 2;
+    fileLabel.Layout.Column = [1 2];
 
-    % -- COM port dropdowns
-    uilabel(lg,'Text','StimJim COM:','Layout',struct('Row',3,'Column',1));
-    ddStimjim = uidropdown(lg,'Items',{},'Layout',struct('Row',3,'Column',2));
+    % Row 3: StimJim COM
+    lblSJ = uilabel(lg,'Text','StimJim COM:');
+    lblSJ.Layout.Row    = 3;
+    lblSJ.Layout.Column = 1;
+    ddStimjim = uidropdown(lg,'Items',{});
+    ddStimjim.Layout.Row    = 3;
+    ddStimjim.Layout.Column = 2;
 
-    uilabel(lg,'Text','DataLogger COM:','Layout',struct('Row',4,'Column',1));
-    ddLogger = uidropdown(lg,'Items',{},'Layout',struct('Row',4,'Column',2));
+    % Row 4: DataLogger COM
+    lblDL = uilabel(lg,'Text','DataLogger COM:');
+    lblDL.Layout.Row    = 4;
+    lblDL.Layout.Column = 1;
+    ddLogger = uidropdown(lg,'Items',{});
+    ddLogger.Layout.Row    = 4;
+    ddLogger.Layout.Column = 2;
 
+    % Row 5: Refresh ports
     btnRefreshPorts = uibutton(lg,'Text','Refresh ports',...
-        'Layout',struct('Row',5,'Column',[1 2]),...
         'ButtonPushedFcn',@(~,~) refreshPorts());
+    btnRefreshPorts.Layout.Row    = 5;
+    btnRefreshPorts.Layout.Column = [1 2];
 
-    % -- Load patterns button
+    % Row 6: Load patterns
     btnLoad = uibutton(lg,'Text','Load patterns into StimJim',...
-        'Layout',struct('Row',6,'Column',[1 2]),...
         'BackgroundColor',[0.85 0.85 0.85],...
         'ButtonPushedFcn',@loadPatterns);
+    btnLoad.Layout.Row    = 6;
+    btnLoad.Layout.Column = [1 2];
 
-    lblLoadStatus = uilabel(lg,'Text','','HorizontalAlignment','center',...
-        'Layout',struct('Row',7,'Column',[1 2]));
+    % Row 7: Load status
+    lblLoadStatus = uilabel(lg,'Text','','HorizontalAlignment','center');
+    lblLoadStatus.Layout.Row    = 7;
+    lblLoadStatus.Layout.Column = [1 2];
 
-    % -- Calibration boxes
-    uilabel(lg,'Text','— Calibration —','HorizontalAlignment','center',...
-        'FontWeight','bold','Layout',struct('Row',8,'Column',[1 2]));
+    % Row 8: Calibration header
+    lblCal = uilabel(lg,'Text','--- Calibration ---','HorizontalAlignment','center','FontWeight','bold');
+    lblCal.Layout.Row    = 8;
+    lblCal.Layout.Column = [1 2];
 
-    uilabel(lg,'Text','V offset:','Layout',struct('Row',9,'Column',1));
-    efVoff = uieditfield(lg,'numeric','Value',DEFAULT_V_OFFSET,...
-        'Layout',struct('Row',9,'Column',2));
+    % Row 9: V offset
+    lblVoff = uilabel(lg,'Text','V offset:');
+    lblVoff.Layout.Row    = 9;
+    lblVoff.Layout.Column = 1;
+    efVoff = uieditfield(lg,'numeric','Value',DEFAULT_V_OFFSET);
+    efVoff.Layout.Row    = 9;
+    efVoff.Layout.Column = 2;
 
-    uilabel(lg,'Text','V scale (u/V):','Layout',struct('Row',10,'Column',1));
-    efVscl = uieditfield(lg,'numeric','Value',DEFAULT_V_SCALE,...
-        'Layout',struct('Row',10,'Column',2));
+    % Row 10: V scale
+    lblVscl = uilabel(lg,'Text','V scale (u/V):');
+    lblVscl.Layout.Row    = 10;
+    lblVscl.Layout.Column = 1;
+    efVscl = uieditfield(lg,'numeric','Value',DEFAULT_V_SCALE);
+    efVscl.Layout.Row    = 10;
+    efVscl.Layout.Column = 2;
 
-    uilabel(lg,'Text','I offset:','Layout',struct('Row',11,'Column',1));
-    efIoff = uieditfield(lg,'numeric','Value',DEFAULT_I_OFFSET,...
-        'Layout',struct('Row',11,'Column',2));
+    % Row 11: I offset
+    lblIoff = uilabel(lg,'Text','I offset:');
+    lblIoff.Layout.Row    = 11;
+    lblIoff.Layout.Column = 1;
+    efIoff = uieditfield(lg,'numeric','Value',DEFAULT_I_OFFSET);
+    efIoff.Layout.Row    = 11;
+    efIoff.Layout.Column = 2;
 
-    uilabel(lg,'Text','I scale (u/mA):','Layout',struct('Row',12,'Column',1));
-    efIscl = uieditfield(lg,'numeric','Value',DEFAULT_I_SCALE,...
-        'Layout',struct('Row',12,'Column',2));
+    % Row 12: I scale
+    lblIscl = uilabel(lg,'Text','I scale (u/mA):');
+    lblIscl.Layout.Row    = 12;
+    lblIscl.Layout.Column = 1;
+    efIscl = uieditfield(lg,'numeric','Value',DEFAULT_I_SCALE);
+    efIscl.Layout.Row    = 12;
+    efIscl.Layout.Column = 2;
 
-    % -- Action buttons
-    btnStart = uibutton(lg,'Text','▶  Start testing',...
-        'Layout',struct('Row',13,'Column',[1 2]),...
+    % Row 13: Start testing
+    btnStart = uibutton(lg,'Text','> Start testing',...
         'BackgroundColor',[0.2 0.7 0.3],'FontColor','white','FontWeight','bold',...
         'Enable','off',...
         'ButtonPushedFcn',@startTesting);
+    btnStart.Layout.Row    = 13;
+    btnStart.Layout.Column = [1 2];
 
+    % Row 14: Save buttons (nested grid)
     bg = uigridlayout(lg,[1 2]);
-    bg.Layout = struct('Row',14,'Column',[1 2]);
-    bg.Padding = [0 0 0 0];
-    bg.ColumnWidth = {'1x','1x'};
+    bg.Layout.Row    = 14;
+    bg.Layout.Column = [1 2];
+    bg.Padding       = [0 0 0 0];
+    bg.ColumnWidth   = {'1x','1x'};
     btnSaveData = uibutton(bg,'Text','Save data','Enable','off',...
         'ButtonPushedFcn',@saveData);
     btnSaveFig  = uibutton(bg,'Text','Save graphs','Enable','off',...
@@ -126,13 +167,20 @@ function StimValidationGUI()
 
     %% --- RIGHT PANEL --------------------------------------------------
     rightPanel = uipanel(gl,'Title','Results','FontWeight','bold');
+    rightPanel.Layout.Row    = 1;
+    rightPanel.Layout.Column = 2;
+
     rg = uigridlayout(rightPanel,[2 2]);
     rg.RowHeight   = {'3x','1x'};
     rg.ColumnWidth = {'4x','1x'};
 
-    % Axes
-    axV = uiaxes(rg);  axV.Layout = struct('Row',1,'Column',1);
-    axI = uiaxes(rg);  axI.Layout = struct('Row',2,'Column',1);
+    % Axes (column 1)
+    axV = uiaxes(rg);
+    axV.Layout.Row    = 1;
+    axV.Layout.Column = 1;
+    axI = uiaxes(rg);
+    axI.Layout.Row    = 2;
+    axI.Layout.Column = 1;
 
     xlabel(axV,'Time (ms)');  ylabel(axV,'Voltage (V)');
     xlabel(axI,'Time (ms)');  ylabel(axI,'Current (mA)');
@@ -141,20 +189,20 @@ function StimValidationGUI()
     axI.XGrid = 'on';  axI.YGrid = 'on';
     hold(axV,'on');    hold(axI,'on');
 
-    % Pattern list box
-    uilabel(rg,'Text','Patterns','HorizontalAlignment','center',...
-        'FontWeight','bold','Layout',struct('Row',1,'Column',2));
-    lbPatterns = uilistbox(rg,'Items',{},...
-        'Layout',struct('Row',2,'Column',2),...
-        'ValueChangedFcn',@onPatternSelect);
+    % Pattern list + label (column 2)
+    lblPats = uilabel(rg,'Text','Patterns','HorizontalAlignment','center','FontWeight','bold');
+    lblPats.Layout.Row    = 1;
+    lblPats.Layout.Column = 2;
+    lbPatterns = uilistbox(rg,'Items',{},'ValueChangedFcn',@onPatternSelect);
+    lbPatterns.Layout.Row    = 2;
+    lbPatterns.Layout.Column = 2;
 
-    % Stimulus command display (scrollable text area, spans full width)
-    % placed below axes — we add it as a separate uipanel inside rg row 2 col 1
+    % Stimulus command display (scrollable, row 2 col 1)
     cmdPanel = uipanel(rg,'Title','Stimulus commands');
-    cmdPanel.Layout = struct('Row',2,'Column',1);
-    taCmd = uitextarea(cmdPanel,'Editable','off','Value',{'(load settings file to populate)'},...
-        'Position',[5 5 1 1]); % position overridden by SizeChangedFcn below
-    cmdPanel.SizeChangedFcn = @(src,~) set(taCmd,'Position',[5 5 src.InnerPosition(3)-10 src.InnerPosition(4)-10]);
+    cmdPanel.Layout.Row    = 2;
+    cmdPanel.Layout.Column = 1;
+    taCmd = uitextarea(cmdPanel,'Editable','off','Value',{'(load settings file to populate)'});
+    taCmd.Position = [5 5 300 120];   % will resize with panel
 
     %% ----------------------------------------------------------------
     %  Initialise port list
