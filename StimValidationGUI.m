@@ -147,15 +147,15 @@ function StimValidationGUI()
     sjMonPanel.Layout.Row    = 1;
     sjMonPanel.Layout.Column = 1;
     taSJ = uitextarea(sjMonPanel,'Editable','off','Value',{''});
-    taSJ.Units    = 'normalized';
-    taSJ.Position = [0 0 1 1];
+    taSJ.Position = [1 1 200 60];  % pixels; panel resizes this via SizeChangedFcn
+    sjMonPanel.SizeChangedFcn = @(s,~) safeResize(taSJ, s);
 
     dlMonPanel = uipanel(monGrid,'Title','DataLogger RX');
     dlMonPanel.Layout.Row    = 2;
     dlMonPanel.Layout.Column = 1;
     taDL = uitextarea(dlMonPanel,'Editable','off','Value',{''});
-    taDL.Units    = 'normalized';
-    taDL.Position = [0 0 1 1];
+    taDL.Position = [1 1 200 60];
+    dlMonPanel.SizeChangedFcn = @(s,~) safeResize(taDL, s);
 
     %% --- RIGHT PANEL --------------------------------------------------
     rightPanel = uipanel(gl,'Title','Results','FontWeight','bold');
@@ -205,8 +205,8 @@ function StimValidationGUI()
     cmdPanel.Layout.Row    = 2;
     cmdPanel.Layout.Column = 1;
     taCmd = uitextarea(cmdPanel,'Editable','off','Value',{'(browse to a settings file)'});
-    taCmd.Units    = 'normalized';
-    taCmd.Position = [0 0 1 1];
+    taCmd.Position = [1 1 200 60];
+    cmdPanel.SizeChangedFcn = @(s,~) safeResize(taCmd, s);
 
     %% ----------------------------------------------------------------
     %  Initialise port list
@@ -219,10 +219,16 @@ function StimValidationGUI()
 
     % ----------------------------------------------------------------
     function browseFile(~,~)
-        [fn,fp] = uigetfile('*.txt','Select experiment settings file');
+        % drawnow flushes the event queue before opening the file dialog.
+        % This prevents a deadlock in R2025b where uigetfile can stall
+        % when called directly from a uifigure button callback.
+        drawnow;
+        [fn,fp] = uigetfile('*.txt','Select experiment settings file',...
+            'MultiSelect','off');
         if isequal(fn,0), return; end
         settingsFile = fullfile(fp,fn);
         fileLabel.Text = settingsFile;
+        drawnow;
         parseSettingsFile();
     end
 
@@ -247,19 +253,24 @@ function StimValidationGUI()
     % ----------------------------------------------------------------
     function parseSettingsFile()
         if isempty(settingsFile), return; end
-        try
-            lines = readlines(settingsFile);
-        catch
-            fid = fopen(settingsFile,'r');
-            rawTxt = fread(fid,'*char')';
-            fclose(fid);
-            lines = string(strsplit(rawTxt,'\n'));
+        % Read file with fopen for maximum version compatibility.
+        % readlines() behaviour with \r\n endings varies across releases;
+        % fopen/fread + manual split is reliable on all versions.
+        fid = fopen(settingsFile,'r');
+        if fid < 0
+            uialert(fig, ['Cannot open file: ' settingsFile], 'File error');
+            return;
         end
+        rawTxt = fread(fid,'*char')';
+        fclose(fid);
+        % Normalise line endings: remove all \r so split on \n is clean
+        rawTxt = strrep(rawTxt, char(13), '');
+        lines  = strsplit(rawTxt, '\n');
 
         pats    = struct([]);
         cmdStrs = {};
         for k = 12:numel(lines)
-            ln = strtrim(char(lines(k)));
+            ln = strtrim(lines{k});
             if numel(ln) < 3 || ln(2) ~= ')', continue; end
             label = ln(1);
             if ~isstrprop(label,'digit'), continue; end
@@ -676,6 +687,19 @@ function StimValidationGUI()
         defaults = [1952, 41, 2052, 843];
         if numel(nums) < 4, nums = [nums, defaults(numel(nums)+1:end)]; end
         Voff = nums(1); Vscl = nums(2); Ioff = nums(3); Iscl = nums(4);
+    end
+
+    function safeResize(ta, panel)
+        % Resize a uitextarea to fill its parent uipanel in pixel units.
+        % Called from SizeChangedFcn; guards against zero/negative sizes
+        % that can occur during initial layout in R2021a.
+        try
+            ip = panel.InnerPosition;
+            w  = max(10, ip(3) - 2);
+            h  = max(10, ip(4) - 2);
+            ta.Position = [1 1 w h];
+        catch
+        end
     end
 
 end % StimValidationGUI
