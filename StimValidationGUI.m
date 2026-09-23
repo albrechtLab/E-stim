@@ -1,68 +1,64 @@
 function StimValidationGUI()
 % StimValidationGUI  — Electrical stimulation waveform validation tool
 %
-% Reads an experiment settings file, programs the StimJim via serial,
-% streams fast (20 kHz) waveform data from a DataLogger Arduino for each
-% stimulus pattern, displays voltage and current traces, and saves results.
+% DataLogger memory-mode output format (3 columns per line):
+%   time_us, V_raw, I_raw
 %
-% DataLogger command protocol (sent in sequence before each capture):
-%   "i50"  — set sample interval to 50 µs (20 kHz)
-%   "n2"   — 2 analogue channels
-%   "L0"   — no trigger limit (free-run)
-%   "m"    — trigger a fast memory capture (~2000 points streamed back)
-%
-% StimJim command protocol:
+% StimJim S command format:
 %   S<n>,<mode0>,<mode1>,<period_us>,<duration_us>; <a0>,<a1>,<dur>; ...
-%   T<n>   — trigger pattern n
-%   T-1    — force stop
+%   T<n>  — trigger pattern n       T-1  — force stop
 %
-% Calibration defaults (raw ADC units → physical):
-%   Voltage : (raw - 1952) / 41       [V]
-%   Current : (raw - 2052) / 843      [mA]
+% Calibration:  physical = (raw - offset) / scale
+%   Voltage : offset=1952, scale=41   [V]
+%   Current : offset=2052, scale=843  [mA]
 
     %% ----------------------------------------------------------------
     %  Constants
     %% ----------------------------------------------------------------
-    STIM_DURATION_US   = 500000;   % override pulse-train duration (µs)
+    STIM_DURATION_US   = 500000;   % override pulse-train duration (us)
     TOTAL_TIME_PER_PAT = 1.0;      % seconds between triggers
     LOGGER_INIT_PAUSE  = 3.0;      % s between logger init commands
     SERIAL_BAUD        = 115200;
     ESTIM_FOLDER       = 'D:/Data/E_stim_waveforms';
-
-    DEFAULT_V_OFFSET   = 1952;
-    DEFAULT_V_SCALE    = 41;       % ADC units per V
-    DEFAULT_I_OFFSET   = 2052;
-    DEFAULT_I_SCALE    = 843;      % ADC units per mA
+    SJ_ACK_PAUSE       = 2.0;      % s to wait for StimJim ack after send
 
     %% ----------------------------------------------------------------
     %  Shared state
     %% ----------------------------------------------------------------
-    settingsFile  = '';
-    patterns      = struct([]);   % parsed stim patterns
-    resultData    = struct([]);   % captured waveforms
-    loggerReady   = false;
-    sjPort        = [];           % StimJim serialport object
-    dlPort        = [];           % DataLogger serialport object
+    settingsFile = '';
+    patterns     = struct([]);
+    resultData   = struct([]);
+    loggerReady  = false;
+    sjPort       = [];
+    dlPort       = [];
+    saveTimestamp = '';
 
     %% ----------------------------------------------------------------
-    %  Build GUI
+    %  Build GUI  — all Layout assignments are post-construction
     %% ----------------------------------------------------------------
-    fig = uifigure('Name','StimJim Waveform Validator','Position',[100 80 1200 750]);
+    fig = uifigure('Name','StimJim Waveform Validator','Position',[60 60 1300 780]);
     fig.CloseRequestFcn = @onClose;
 
+    %  Top-level: left control panel | right results panel
     gl = uigridlayout(fig,[1 2]);
-    gl.ColumnWidth = {'1x','2x'};
+    gl.ColumnWidth = {'1x','2.4x'};
+    gl.Padding     = [6 6 6 6];
+    gl.ColumnSpacing = 6;
 
     %% --- LEFT PANEL ---------------------------------------------------
     leftPanel = uipanel(gl,'Title','Control','FontWeight','bold');
     leftPanel.Layout.Row    = 1;
     leftPanel.Layout.Column = 1;
 
-    lg = uigridlayout(leftPanel,[14 2]);
-    lg.RowHeight   = {30,30,30,30,30,30,30,22,22,22,22,30,30,'1x'};
+    % 12 rows: file, filepath, SJ port, DL port, refresh, load, status,
+    %          calib header, calib entry, start, saves, serial monitors
+    lg = uigridlayout(leftPanel,[12 2]);
+    lg.RowHeight   = {28,24,28,28,28,28,20,18,28,32,28,'1x'};
     lg.ColumnWidth = {'1x','1x'};
+    lg.Padding     = [4 4 4 4];
+    lg.RowSpacing  = 3;
 
-    % Row 1: Settings file label + browse button
+    % Row 1 — file browse
     lblSettings = uilabel(lg,'Text','Settings file:','FontWeight','bold');
     lblSettings.Layout.Row    = 1;
     lblSettings.Layout.Column = 1;
@@ -70,12 +66,12 @@ function StimValidationGUI()
     btnFile.Layout.Row    = 1;
     btnFile.Layout.Column = 2;
 
-    % Row 2: selected file path
-    fileLabel = uilabel(lg,'Text','(none)','WordWrap','on');
+    % Row 2 — filepath display
+    fileLabel = uilabel(lg,'Text','(none)','FontColor',[0.4 0.4 0.4]);
     fileLabel.Layout.Row    = 2;
     fileLabel.Layout.Column = [1 2];
 
-    % Row 3: StimJim COM
+    % Row 3 — StimJim COM
     lblSJ = uilabel(lg,'Text','StimJim COM:');
     lblSJ.Layout.Row    = 3;
     lblSJ.Layout.Column = 1;
@@ -83,7 +79,7 @@ function StimValidationGUI()
     ddStimjim.Layout.Row    = 3;
     ddStimjim.Layout.Column = 2;
 
-    % Row 4: DataLogger COM
+    % Row 4 — DataLogger COM
     lblDL = uilabel(lg,'Text','DataLogger COM:');
     lblDL.Layout.Row    = 4;
     lblDL.Layout.Column = 1;
@@ -91,118 +87,130 @@ function StimValidationGUI()
     ddLogger.Layout.Row    = 4;
     ddLogger.Layout.Column = 2;
 
-    % Row 5: Refresh ports
-    btnRefreshPorts = uibutton(lg,'Text','Refresh ports',...
+    % Row 5 — Refresh ports
+    btnRefreshPorts = uibutton(lg,'Text','Refresh COM ports',...
         'ButtonPushedFcn',@(~,~) refreshPorts());
     btnRefreshPorts.Layout.Row    = 5;
     btnRefreshPorts.Layout.Column = [1 2];
 
-    % Row 6: Load patterns
+    % Row 6 — Load patterns
     btnLoad = uibutton(lg,'Text','Load patterns into StimJim',...
         'BackgroundColor',[0.85 0.85 0.85],...
         'ButtonPushedFcn',@loadPatterns);
     btnLoad.Layout.Row    = 6;
     btnLoad.Layout.Column = [1 2];
 
-    % Row 7: Load status
-    lblLoadStatus = uilabel(lg,'Text','','HorizontalAlignment','center');
+    % Row 7 — status label
+    lblLoadStatus = uilabel(lg,'Text','','HorizontalAlignment','center',...
+        'FontColor',[0.2 0.2 0.6]);
     lblLoadStatus.Layout.Row    = 7;
     lblLoadStatus.Layout.Column = [1 2];
 
-    % Row 8: Calibration header
-    lblCal = uilabel(lg,'Text','--- Calibration ---','HorizontalAlignment','center','FontWeight','bold');
+    % Row 8 — calibration header
+    lblCal = uilabel(lg,'Text','Calibration  (Voff  Vscl  Ioff  Iscl):',...
+        'FontWeight','bold','FontSize',11);
     lblCal.Layout.Row    = 8;
     lblCal.Layout.Column = [1 2];
 
-    % Row 9: V offset
-    lblVoff = uilabel(lg,'Text','V offset:');
-    lblVoff.Layout.Row    = 9;
-    lblVoff.Layout.Column = 1;
-    efVoff = uieditfield(lg,'numeric','Value',DEFAULT_V_OFFSET);
-    efVoff.Layout.Row    = 9;
-    efVoff.Layout.Column = 2;
+    % Row 9 — single calibration text field (space/comma separated)
+    efCalib = uieditfield(lg,'text','Value','1952 41 2052 843',...
+        'Tooltip','Enter: V_offset  V_scale  I_offset  I_scale');
+    efCalib.Layout.Row    = 9;
+    efCalib.Layout.Column = [1 2];
 
-    % Row 10: V scale
-    lblVscl = uilabel(lg,'Text','V scale (u/V):');
-    lblVscl.Layout.Row    = 10;
-    lblVscl.Layout.Column = 1;
-    efVscl = uieditfield(lg,'numeric','Value',DEFAULT_V_SCALE);
-    efVscl.Layout.Row    = 10;
-    efVscl.Layout.Column = 2;
-
-    % Row 11: I offset
-    lblIoff = uilabel(lg,'Text','I offset:');
-    lblIoff.Layout.Row    = 11;
-    lblIoff.Layout.Column = 1;
-    efIoff = uieditfield(lg,'numeric','Value',DEFAULT_I_OFFSET);
-    efIoff.Layout.Row    = 11;
-    efIoff.Layout.Column = 2;
-
-    % Row 12: I scale
-    lblIscl = uilabel(lg,'Text','I scale (u/mA):');
-    lblIscl.Layout.Row    = 12;
-    lblIscl.Layout.Column = 1;
-    efIscl = uieditfield(lg,'numeric','Value',DEFAULT_I_SCALE);
-    efIscl.Layout.Row    = 12;
-    efIscl.Layout.Column = 2;
-
-    % Row 13: Start testing
+    % Row 10 — Start testing
     btnStart = uibutton(lg,'Text','> Start testing',...
         'BackgroundColor',[0.2 0.7 0.3],'FontColor','white','FontWeight','bold',...
-        'Enable','off',...
-        'ButtonPushedFcn',@startTesting);
-    btnStart.Layout.Row    = 13;
+        'FontSize',13,'Enable','off','ButtonPushedFcn',@startTesting);
+    btnStart.Layout.Row    = 10;
     btnStart.Layout.Column = [1 2];
 
-    % Row 14: Save buttons (nested grid)
+    % Row 11 — Save buttons
     bg = uigridlayout(lg,[1 2]);
-    bg.Layout.Row    = 14;
+    bg.Layout.Row    = 11;
     bg.Layout.Column = [1 2];
-    bg.Padding       = [0 0 0 0];
-    bg.ColumnWidth   = {'1x','1x'};
-    btnSaveData = uibutton(bg,'Text','Save data','Enable','off',...
+    bg.Padding     = [0 0 0 0];
+    bg.ColumnWidth = {'1x','1x'};
+    btnSaveData = uibutton(bg,'Text','Save data (.mat)','Enable','off',...
         'ButtonPushedFcn',@saveData);
-    btnSaveFig  = uibutton(bg,'Text','Save graphs','Enable','off',...
+    btnSaveFig  = uibutton(bg,'Text','Save graphs (.svg)','Enable','off',...
         'ButtonPushedFcn',@saveFigures);
+
+    % Row 12 — Serial monitor panels (two small scrollable text areas)
+    monGrid = uigridlayout(lg,[2 1]);
+    monGrid.Layout.Row    = 12;
+    monGrid.Layout.Column = [1 2];
+    monGrid.Padding    = [0 0 0 0];
+    monGrid.RowSpacing = 3;
+    monGrid.RowHeight  = {'1x','1x'};
+
+    sjMonPanel = uipanel(monGrid,'Title','StimJim RX');
+    sjMonPanel.Layout.Row    = 1;
+    sjMonPanel.Layout.Column = 1;
+    taSJ = uitextarea(sjMonPanel,'Editable','off','Value',{''});
+    taSJ.Position = [2 2 10 10];   % will be resized by SizeChangedFcn
+    sjMonPanel.SizeChangedFcn = @(s,~) set(taSJ,'Position',...
+        [2 2 max(10,s.InnerPosition(3)-4) max(10,s.InnerPosition(4)-4)]);
+
+    dlMonPanel = uipanel(monGrid,'Title','DataLogger RX');
+    dlMonPanel.Layout.Row    = 2;
+    dlMonPanel.Layout.Column = 1;
+    taDL = uitextarea(dlMonPanel,'Editable','off','Value',{''});
+    taDL.Position = [2 2 10 10];
+    dlMonPanel.SizeChangedFcn = @(s,~) set(taDL,'Position',...
+        [2 2 max(10,s.InnerPosition(3)-4) max(10,s.InnerPosition(4)-4)]);
 
     %% --- RIGHT PANEL --------------------------------------------------
     rightPanel = uipanel(gl,'Title','Results','FontWeight','bold');
     rightPanel.Layout.Row    = 1;
     rightPanel.Layout.Column = 2;
 
+    % 2 rows x 2 cols: axes left (tall), pattern list right, cmd text below
     rg = uigridlayout(rightPanel,[2 2]);
-    rg.RowHeight   = {'3x','1x'};
-    rg.ColumnWidth = {'4x','1x'};
+    rg.RowHeight   = {'4x','1x'};
+    rg.ColumnWidth = {'5x','1x'};
+    rg.Padding     = [4 4 4 4];
 
-    % Axes (column 1)
-    axV = uiaxes(rg);
+    % Both axes live inside a nested grid in col 1, rows 1-2
+    % We use a nested grid for the two axes in col 1
+    axGrid = uigridlayout(rg,[2 1]);
+    axGrid.Layout.Row    = 1;
+    axGrid.Layout.Column = 1;
+    axGrid.Padding    = [0 0 0 0];
+    axGrid.RowSpacing = 4;
+    axGrid.RowHeight  = {'1x','1x'};
+
+    axV = uiaxes(axGrid);
     axV.Layout.Row    = 1;
     axV.Layout.Column = 1;
-    axI = uiaxes(rg);
+    xlabel(axV,'Time (ms)'); ylabel(axV,'Voltage (V)');
+    title(axV,'Voltage'); axV.XGrid = 'on'; axV.YGrid = 'on';
+    hold(axV,'on');
+
+    axI = uiaxes(axGrid);
     axI.Layout.Row    = 2;
     axI.Layout.Column = 1;
+    xlabel(axI,'Time (ms)'); ylabel(axI,'Current (mA)');
+    title(axI,'Current'); axI.XGrid = 'on'; axI.YGrid = 'on';
+    hold(axI,'on');
 
-    xlabel(axV,'Time (ms)');  ylabel(axV,'Voltage (V)');
-    xlabel(axI,'Time (ms)');  ylabel(axI,'Current (mA)');
-    title(axV,'Voltage');     title(axI,'Current');
-    axV.XGrid = 'on';  axV.YGrid = 'on';
-    axI.XGrid = 'on';  axI.YGrid = 'on';
-    hold(axV,'on');    hold(axI,'on');
-
-    % Pattern list + label (column 2)
-    lblPats = uilabel(rg,'Text','Patterns','HorizontalAlignment','center','FontWeight','bold');
+    % Pattern list (col 2, rows 1-2)
+    lblPats = uilabel(rg,'Text','Patterns','HorizontalAlignment','center',...
+        'FontWeight','bold');
     lblPats.Layout.Row    = 1;
     lblPats.Layout.Column = 2;
     lbPatterns = uilistbox(rg,'Items',{},'ValueChangedFcn',@onPatternSelect);
     lbPatterns.Layout.Row    = 2;
     lbPatterns.Layout.Column = 2;
 
-    % Stimulus command display (scrollable, row 2 col 1)
-    cmdPanel = uipanel(rg,'Title','Stimulus commands');
+    % Stimulus commands text area (row 2 col 1)
+    cmdPanel = uipanel(rg,'Title','Stimulus commands (parsed)');
     cmdPanel.Layout.Row    = 2;
     cmdPanel.Layout.Column = 1;
-    taCmd = uitextarea(cmdPanel,'Editable','off','Value',{'(load settings file to populate)'});
-    taCmd.Position = [5 5 300 120];   % will resize with panel
+    taCmd = uitextarea(cmdPanel,'Editable','off','Value',{'(browse to a settings file)'});
+    taCmd.Position = [2 2 10 10];
+    cmdPanel.SizeChangedFcn = @(s,~) set(taCmd,'Position',...
+        [2 2 max(10,s.InnerPosition(3)-4) max(10,s.InnerPosition(4)-4)]);
 
     %% ----------------------------------------------------------------
     %  Initialise port list
@@ -213,6 +221,7 @@ function StimValidationGUI()
     %  CALLBACKS
     %% ================================================================
 
+    % ----------------------------------------------------------------
     function browseFile(~,~)
         [fn,fp] = uigetfile('*.txt','Select experiment settings file');
         if isequal(fn,0), return; end
@@ -227,155 +236,174 @@ function StimValidationGUI()
         if isempty(ports), ports = {'(none)'}; end
         ddStimjim.Items = ports;
         ddLogger.Items  = ports;
-        if numel(ports) >= 2
-            ddLogger.Value = ports{2};
+        n = numel(ports);
+        % Default to last two ports (most recently plugged-in devices)
+        if n >= 2
+            ddStimjim.Value = ports{n-1};
+            ddLogger.Value  = ports{n};
+        elseif n == 1
+            ddStimjim.Value = ports{1};
+            ddLogger.Value  = ports{1};
         end
+        appendMonitor(taSJ, sprintf('[%s] Port list refreshed: %s', timestamp(), strjoin(ports,', ')));
     end
 
     % ----------------------------------------------------------------
     function parseSettingsFile()
         if isempty(settingsFile), return; end
         try
-            lines = readlines(settingsFile);    % MATLAB R2020b+
+            lines = readlines(settingsFile);
         catch
             fid = fopen(settingsFile,'r');
-            raw = fread(fid,'*char')';
+            rawTxt = fread(fid,'*char')';
             fclose(fid);
-            lines = strsplit(raw,'\n');
-            lines = string(lines);
+            lines = string(strsplit(rawTxt,'\n'));
         end
 
-        % Pattern definitions start at line index 12 (1-based),
-        % i.e. lines{12} onward.  Digit-labelled lines are stim patterns.
-        pats = struct([]);
+        pats    = struct([]);
         cmdStrs = {};
         for k = 12:numel(lines)
-            ln = strtrim(lines{k});
+            ln = strtrim(char(lines(k)));
             if numel(ln) < 3 || ln(2) ~= ')', continue; end
             label = ln(1);
             if ~isstrprop(label,'digit'), continue; end
             pNum = str2double(label);
 
-            % Strip comment
             ci = strfind(ln,' % ');
             if ~isempty(ci), ln = strtrim(ln(1:ci(1)-1)); end
 
-            % Body after "N) "
             body = strtrim(ln(3:end));
-
-            % StimJim command is after " | "
-            pi2 = strfind(body,' | ');
+            pi2  = strfind(body,' | ');
             if isempty(pi2), continue; end
             sjCmd = strtrim(body(pi2(1)+3:end));
-
-            % Must start with S
             if isempty(sjCmd) || sjCmd(1) ~= 'S', continue; end
 
-            % Rebuild with correct pattern number and overridden duration
             rebuilt = rebuildSCommand(sjCmd, pNum, STIM_DURATION_US);
             if isempty(rebuilt), continue; end
 
             entry.patternNum  = pNum;
             entry.originalCmd = sjCmd;
             entry.sendCmd     = rebuilt;
-            if isempty(pats)
-                pats = entry;
-            else
-                pats(end+1) = entry;           %#ok<AGROW>
-            end
-            cmdStrs{end+1} = sprintf('Pattern %d: %s', pNum, rebuilt); %#ok<AGROW>
+            if isempty(pats), pats = entry;
+            else,             pats(end+1) = entry; end %#ok<AGROW>
+            cmdStrs{end+1} = sprintf('P%d: %s', pNum, rebuilt); %#ok<AGROW>
         end
 
         patterns = pats;
-
         if isempty(patterns)
-            taCmd.Value = {'No stimulus patterns found in settings file.'};
+            taCmd.Value = {'No stimulus patterns found.'};
             uialert(fig,'No digit-labelled StimJim S commands found.','Parse error');
             return;
         end
-
         taCmd.Value = cmdStrs(:);
         btnLoad.Enable = 'on';
-        lblLoadStatus.Text = sprintf('%d pattern(s) parsed.', numel(patterns));
+        setStatus(sprintf('%d pattern(s) parsed. Select COM ports then click Load.', numel(patterns)));
     end
 
     % ----------------------------------------------------------------
     function loadPatterns(~,~)
         if isempty(patterns)
-            uialert(fig,'Parse a settings file first.','No patterns');
-            return;
+            uialert(fig,'Browse to a settings file first.','No patterns'); return;
         end
-        % Open StimJim port
+
+        %% Open StimJim port
         sjPortName = ddStimjim.Value;
         if strcmp(sjPortName,'(none)')
-            uialert(fig,'Select a StimJim COM port.','No port');
-            return;
+            uialert(fig,'Select a StimJim COM port.','No port'); return;
         end
+        setStatus('Opening StimJim port...');
         try
             if ~isempty(sjPort) && isvalid(sjPort), delete(sjPort); end
-            sjPort = serialport(sjPortName, SERIAL_BAUD);
-            configureTerminator(sjPort,'CR/LF');
-            sjPort.Timeout = 5;
+            sjPort = serialport(sjPortName, SERIAL_BAUD, 'Timeout', 5);
+            configureTerminator(sjPort, 'LF');
+            flush(sjPort);
         catch ME
-            uialert(fig,ME.message,'Serial error'); return;
+            uialert(fig, ME.message, 'StimJim port error'); return;
         end
+        appendMonitor(taSJ, sprintf('[%s] Opened %s at %d baud', timestamp(), sjPortName, SERIAL_BAUD));
 
-        lblLoadStatus.Text = 'Programming StimJim…';
-        drawnow;
-
+        %% Send each S# command, read ack with generous wait
         allOk = true;
         for p = 1:numel(patterns)
             cmd = patterns(p).sendCmd;
+            setStatus(sprintf('Sending pattern %d/%d: %s', p, numel(patterns), cmd));
+            flush(sjPort);
             writeline(sjPort, cmd);
-            pause(1.5);
+            appendMonitor(taSJ, sprintf('[%s] TX: %s', timestamp(), cmd));
+
+            % Wait up to SJ_ACK_PAUSE seconds, reading all available lines
             resp = '';
-            while sjPort.NumBytesAvailable > 0
-                resp = [resp, readline(sjPort)]; %#ok<AGROW>
+            t0 = tic;
+            while toc(t0) < SJ_ACK_PAUSE
+                pause(0.05);
+                while sjPort.NumBytesAvailable > 0
+                    try
+                        ln = readline(sjPort);
+                        ln = strtrim(char(ln));
+                        if ~isempty(ln)
+                            resp = [resp, ln, ' | ']; %#ok<AGROW>
+                            appendMonitor(taSJ, sprintf('[%s] RX: %s', timestamp(), ln));
+                        end
+                    catch, break; end
+                end
             end
-            ok = contains(resp,'V') || contains(resp,'mV') || contains(resp,'uA');
+
+            % StimJim printPulseTrainParameters always prints "mV" and "uA"
+            ok = contains(resp,'mV') || contains(resp,'uA') || contains(resp,'Parameters');
             if ok
-                lblLoadStatus.Text = sprintf('Sent pattern %d/%d OK', p, numel(patterns));
+                appendMonitor(taSJ, sprintf('[%s] Pattern %d ACK OK', timestamp(), patterns(p).patternNum));
             else
-                lblLoadStatus.Text = sprintf('WARNING: No ack for pattern %d', patterns(p).patternNum);
+                appendMonitor(taSJ, sprintf('[%s] WARNING: No ACK for pattern %d (got: %s)',...
+                    timestamp(), patterns(p).patternNum, resp));
                 allOk = false;
             end
             drawnow;
         end
 
-        % Initialise DataLogger
+        %% Open DataLogger port
         dlPortName = ddLogger.Value;
         if strcmp(dlPortName,'(none)')
-            uialert(fig,'Select a DataLogger COM port.','No port');
-            return;
+            uialert(fig,'Select a DataLogger COM port.','No port'); return;
         end
+        setStatus('Opening DataLogger port...');
         try
             if ~isempty(dlPort) && isvalid(dlPort), delete(dlPort); end
-            dlPort = serialport(dlPortName, SERIAL_BAUD);
-            configureTerminator(dlPort,'LF');
-            dlPort.Timeout = 10;
+            dlPort = serialport(dlPortName, SERIAL_BAUD, 'Timeout', 10);
+            configureTerminator(dlPort, 'LF');
+            flush(dlPort);
         catch ME
-            uialert(fig,ME.message,'Serial error'); return;
+            uialert(fig, ME.message, 'DataLogger port error'); return;
         end
+        appendMonitor(taDL, sprintf('[%s] Opened %s at %d baud', timestamp(), dlPortName, SERIAL_BAUD));
 
-        lblLoadStatus.Text = 'Initialising DataLogger (i50)…'; drawnow;
-        writeline(dlPort,'i50');  pause(LOGGER_INIT_PAUSE);
-
-        lblLoadStatus.Text = 'Initialising DataLogger (n2)…';  drawnow;
-        writeline(dlPort,'n2');   pause(LOGGER_INIT_PAUSE);
-
-        lblLoadStatus.Text = 'Initialising DataLogger (L0)…';  drawnow;
-        writeline(dlPort,'L0');   pause(LOGGER_INIT_PAUSE);
+        %% Initialise DataLogger: i50, n2, L0 with pause and readback
+        loggerInitCmds = {'i50','n2','L0'};
+        loggerInitDesc = {'sample interval 50us (20kHz)','2 channels','no trigger limit'};
+        for ci = 1:3
+            setStatus(sprintf('DataLogger init: %s (%s)...', loggerInitCmds{ci}, loggerInitDesc{ci}));
+            flush(dlPort);
+            writeline(dlPort, loggerInitCmds{ci});
+            appendMonitor(taDL, sprintf('[%s] TX: %s', timestamp(), loggerInitCmds{ci}));
+            pause(LOGGER_INIT_PAUSE);
+            while dlPort.NumBytesAvailable > 0
+                try
+                    ln = strtrim(char(readline(dlPort)));
+                    if ~isempty(ln)
+                        appendMonitor(taDL, sprintf('[%s] RX: %s', timestamp(), ln));
+                    end
+                catch, break; end
+            end
+            drawnow;
+        end
 
         loggerReady = true;
-
-        if allOk
-            lblLoadStatus.Text = 'All patterns loaded. Logger ready.';
-            btnLoad.BackgroundColor = [0.3 0.8 0.3];
-        else
-            lblLoadStatus.Text = 'Patterns loaded with warnings. Logger ready.';
-            btnLoad.BackgroundColor = [1.0 0.8 0.2];
-        end
+        btnLoad.BackgroundColor = [0.3 0.8 0.3];
         btnStart.Enable = 'on';
+        if allOk
+            setStatus('All patterns loaded. Logger ready. Click Start testing.');
+        else
+            setStatus('Patterns loaded with warnings (check StimJim monitor). Logger ready.');
+        end
         drawnow;
     end
 
@@ -384,57 +412,60 @@ function StimValidationGUI()
         if isempty(patterns) || ~loggerReady
             uialert(fig,'Load patterns first.','Not ready'); return;
         end
-        btnStart.Enable = 'off';
-        resultData = struct([]);
-        timestamp  = datetime('now','Format','yyyy-MM-dd_HH-mm-ss');
+        btnStart.Enable    = 'off';
+        btnSaveData.Enable = 'off';
+        btnSaveFig.Enable  = 'off';
+        resultData    = struct([]);
+        lbPatterns.Items = {};
+        saveTimestamp = char(datetime('now','Format','yyyy-MM-dd_HH-mm-ss'));
 
         for p = 1:numel(patterns)
             if ~isvalid(fig), break; end
-            pNum   = patterns(p).patternNum;
+            pNum    = patterns(p).patternNum;
             trigCmd = sprintf('T%d', pNum);
 
-            lblLoadStatus.Text = sprintf('Testing pattern %d/%d…', p, numel(patterns));
-            drawnow;
+            setStatus(sprintf('Testing pattern %d/%d — sending %s...', p, numel(patterns), trigCmd));
 
             % Trigger StimJim
+            flush(sjPort);
             writeline(sjPort, trigCmd);
+            appendMonitor(taSJ, sprintf('[%s] TX: %s', timestamp(), trigCmd));
 
-            % Immediately trigger DataLogger fast capture
+            % Small gap then trigger DataLogger memory capture
+            pause(0.02);
+            flush(dlPort);
             writeline(dlPort, 'm');
+            appendMonitor(taDL, sprintf('[%s] TX: m (capture triggered)', timestamp()));
 
-            % Read streamed data back from DataLogger
-            raw = readLoggerCapture(dlPort);
+            % Read capture data (3 cols: time_us, V_raw, I_raw)
+            raw = readLoggerCapture(dlPort, taDL, @timestamp, @appendMonitor);
 
             % Store result
-            entry.patternNum  = pNum;
-            entry.sendCmd     = patterns(p).sendCmd;
-            entry.triggerCmd  = trigCmd;
-            entry.timestamp   = timestamp;
-            entry.rawData     = raw;   % Nx2: [ch1, ch2]
-            if isempty(resultData)
-                resultData = entry;
-            else
-                resultData(end+1) = entry; %#ok<AGROW>
-            end
+            entry.patternNum = pNum;
+            entry.sendCmd    = patterns(p).sendCmd;
+            entry.triggerCmd = trigCmd;
+            entry.timestamp  = saveTimestamp;
+            entry.rawData    = raw;   % Nx3: [time_us, V_raw, I_raw]
+            if isempty(resultData), resultData = entry;
+            else,                   resultData(end+1) = entry; end %#ok<AGROW>
 
-            % Update list box
+            % Update pattern list and plot
             items = lbPatterns.Items;
             items{end+1} = sprintf('Pattern %d', pNum);
             lbPatterns.Items = items;
             lbPatterns.Value = items{end};
-
-            % Plot immediately
             plotPattern(p);
 
-            % Wait remainder of total slot
-            pause(max(0, TOTAL_TIME_PER_PAT - 0.5));
+            setStatus(sprintf('Pattern %d captured (%d points). Waiting...', pNum, size(raw,1)));
+            pause(max(0, TOTAL_TIME_PER_PAT - 0.1));
         end
 
         % Force StimJim stop
         writeline(sjPort,'T-1');
+        appendMonitor(taSJ, sprintf('[%s] TX: T-1 (stop)', timestamp()));
 
-        lblLoadStatus.Text = sprintf('Done. %d pattern(s) captured.', numel(resultData));
-        btnStart.Enable  = 'on';
+        setStatus(sprintf('Done. %d pattern(s) captured.', numel(resultData)));
+        btnStart.Enable    = 'on';
         btnSaveData.Enable = 'on';
         btnSaveFig.Enable  = 'on';
         drawnow;
@@ -442,7 +473,7 @@ function StimValidationGUI()
 
     % ----------------------------------------------------------------
     function onPatternSelect(~,~)
-        idx = find(strcmp(lbPatterns.Items, lbPatterns.Value));
+        idx = find(strcmp(lbPatterns.Items, lbPatterns.Value),1);
         if ~isempty(idx) && idx <= numel(resultData)
             plotPattern(idx);
         end
@@ -452,36 +483,40 @@ function StimValidationGUI()
     function plotPattern(idx)
         if idx > numel(resultData), return; end
         d = resultData(idx);
-        if isempty(d.rawData), return; end
+        if isempty(d.rawData) || size(d.rawData,1) < 2, return; end
 
-        Voff  = efVoff.Value;  Vscl = efVscl.Value;
-        Ioff  = efIoff.Value;  Iscl = efIscl.Value;
+        % Parse calibration from single text box
+        [Voff, Vscl, Ioff, Iscl] = parseCalib(efCalib.Value);
 
-        nPts  = size(d.rawData,1);
-        t_us  = (0:nPts-1)' * 50;          % 50 µs per sample at 20 kHz
-        t_ms  = t_us / 1000;
+        % Columns from DataLogger memory mode: time_us | V_raw | I_raw
+        t_us = d.rawData(:,1);
+        Vraw = d.rawData(:,2);
+        Iraw = d.rawData(:,3);
 
-        Vcal  = (d.rawData(:,1) - Voff) / Vscl;
-        Ical  = (d.rawData(:,2) - Ioff) / Iscl;
-        zero  = zeros(nPts,1);
+        % Normalise time to start at 0, convert to ms
+        t_ms = (t_us - t_us(1)) / 1000;
 
+        Vcal = (Vraw - Voff) / Vscl;
+        Ical = (Iraw - Ioff) / Iscl;
+        zero = zeros(size(t_ms));
+
+        % --- Voltage axes ---
         cla(axV); hold(axV,'on');
-        fill(axV,[t_ms; flipud(t_ms)],[Vcal; flipud(zero)],[0.2 0.5 0.9],...
-            'FaceAlpha',0.35,'EdgeColor','none');
-        plot(axV, t_ms, Vcal, 'Color',[0.1 0.3 0.8],'LineWidth',1.5);
-        plot(axV, t_ms, zero, 'k-','LineWidth',0.5);
-        ylabel(axV,'Voltage (V)');
-        xlabel(axV,'Time (ms)');
+        fill(axV, [t_ms; flipud(t_ms)], [Vcal; flipud(zero)], [0.2 0.5 0.9], ...
+            'FaceAlpha',0.3,'EdgeColor','none');
+        plot(axV, t_ms, Vcal, 'Color',[0.1 0.3 0.8], 'LineWidth',1.5);
+        yline(axV, 0, 'k-', 'LineWidth',0.8);
+        xlabel(axV,'Time (ms)'); ylabel(axV,'Voltage (V)');
         title(axV, sprintf('Pattern %d — Voltage', d.patternNum));
         axV.XGrid = 'on'; axV.YGrid = 'on';
 
+        % --- Current axes ---
         cla(axI); hold(axI,'on');
-        fill(axI,[t_ms; flipud(t_ms)],[Ical; flipud(zero)],[0.9 0.3 0.2],...
-            'FaceAlpha',0.35,'EdgeColor','none');
-        plot(axI, t_ms, Ical, 'Color',[0.8 0.1 0.1],'LineWidth',1.5);
-        plot(axI, t_ms, zero, 'k-','LineWidth',0.5);
-        ylabel(axI,'Current (mA)');
-        xlabel(axI,'Time (ms)');
+        fill(axI, [t_ms; flipud(t_ms)], [Ical; flipud(zero)], [0.9 0.3 0.2], ...
+            'FaceAlpha',0.3,'EdgeColor','none');
+        plot(axI, t_ms, Ical, 'Color',[0.8 0.1 0.1], 'LineWidth',1.5);
+        yline(axI, 0, 'k-', 'LineWidth',0.8);
+        xlabel(axI,'Time (ms)'); ylabel(axI,'Current (mA)');
         title(axI, sprintf('Pattern %d — Current', d.patternNum));
         axI.XGrid = 'on'; axI.YGrid = 'on';
 
@@ -494,62 +529,44 @@ function StimValidationGUI()
             uialert(fig,'No data to save.','Empty'); return;
         end
         if ~isfolder(ESTIM_FOLDER), mkdir(ESTIM_FOLDER); end
-        ts   = char(resultData(1).timestamp);
-        fname = fullfile(ESTIM_FOLDER, ['StimValidation_' ts '.mat']);
+        fname = fullfile(ESTIM_FOLDER, ['StimValidation_' saveTimestamp '.mat']);
         save(fname,'resultData');
-        lblLoadStatus.Text = ['Data saved: ' fname];
-        uialert(fig,['Saved to: ' fname],'Saved','Icon','success');
+        setStatus(['Data saved: ' fname]);
+        uialert(fig,['Saved: ' fname],'Saved','Icon','success');
     end
 
     % ----------------------------------------------------------------
     function saveFigures(~,~)
+        % Loop through each pattern, call plotPattern to update the
+        % shared axes, then export those axes directly — no duplicate code.
         if isempty(resultData)
             uialert(fig,'No data to save.','Empty'); return;
         end
         if ~isfolder(ESTIM_FOLDER), mkdir(ESTIM_FOLDER); end
-        ts = char(resultData(1).timestamp);
 
         for idx = 1:numel(resultData)
             plotPattern(idx);
             drawnow;
+            pNum = resultData(idx).patternNum;
+            base = fullfile(ESTIM_FOLDER, ...
+                sprintf('StimValidation_%s_P%d', saveTimestamp, pNum));
 
-            % Capture current axes into a standalone figure
-            fh = figure('Visible','off','Position',[0 0 900 500]);
-            axV2 = subplot(2,1,1,'Parent',fh);
-            axI2 = subplot(2,1,2,'Parent',fh);
-
-            d     = resultData(idx);
-            nPts  = size(d.rawData,1);
-            t_ms  = (0:nPts-1)' * 50 / 1000;
-            Vcal  = (d.rawData(:,1) - efVoff.Value) / efVscl.Value;
-            Ical  = (d.rawData(:,2) - efIoff.Value) / efIscl.Value;
-            zero  = zeros(nPts,1);
-
-            hold(axV2,'on');
-            fill(axV2,[t_ms; flipud(t_ms)],[Vcal; flipud(zero)],[0.2 0.5 0.9],...
-                'FaceAlpha',0.35,'EdgeColor','none');
-            plot(axV2, t_ms, Vcal,'Color',[0.1 0.3 0.8],'LineWidth',1.5);
-            yline(axV2,0,'k-','LineWidth',0.5);
-            ylabel(axV2,'Voltage (V)'); xlabel(axV2,'Time (ms)');
-            title(axV2, sprintf('Pattern %d — Voltage', d.patternNum));
-            grid(axV2,'on');
-
-            hold(axI2,'on');
-            fill(axI2,[t_ms; flipud(t_ms)],[Ical; flipud(zero)],[0.9 0.3 0.2],...
-                'FaceAlpha',0.35,'EdgeColor','none');
-            plot(axI2, t_ms, Ical,'Color',[0.8 0.1 0.1],'LineWidth',1.5);
-            yline(axI2,0,'k-','LineWidth',0.5);
-            ylabel(axI2,'Current (mA)'); xlabel(axI2,'Time (ms)');
-            title(axI2, sprintf('Pattern %d — Current', d.patternNum));
-            grid(axI2,'on');
-
-            base = fullfile(ESTIM_FOLDER, sprintf('StimValidation_%s_P%d', ts, d.patternNum));
-            savefig(fh, [base '.fig']);
-            saveas(fh,  [base '.svg']);
-            close(fh);
+            % Export the two live axes into a temporary figure for saving
+            % (exportgraphics on uiaxes writes SVG directly in R2020b+)
+            try
+                exportgraphics(axV, [base '_V.svg']);
+                exportgraphics(axI, [base '_I.svg']);
+            catch
+                % Fallback: copy axes into a regular figure
+                fh = figure('Visible','off','Position',[0 0 900 500]);
+                copyobj([axV axI], fh);
+                saveas(fh, [base '.svg']);
+                close(fh);
+            end
+            setStatus(sprintf('Saved graph %d/%d', idx, numel(resultData)));
+            drawnow;
         end
-        lblLoadStatus.Text = sprintf('Graphs saved (%d files).', numel(resultData));
-        uialert(fig,sprintf('%d figure(s) saved to %s', numel(resultData), ESTIM_FOLDER),...
+        uialert(fig, sprintf('%d graph(s) saved to %s', numel(resultData), ESTIM_FOLDER),...
             'Saved','Icon','success');
     end
 
@@ -567,29 +584,59 @@ function StimValidationGUI()
         delete(fig);
     end
 
+    %% ================================================================
+    %  Utility sub-functions (nested, access shared state)
+    %% ================================================================
+
+    function setStatus(msg)
+        lblLoadStatus.Text = msg;
+        drawnow;
+    end
+
+    function appendMonitor(ta, msg)
+        % Append a line to a serial monitor text area, keep last 200 lines
+        v = ta.Value;
+        if isempty(v) || (numel(v)==1 && isempty(char(v{1}))), v = {}; end
+        v{end+1} = msg;
+        if numel(v) > 200, v = v(end-199:end); end
+        ta.Value = v;
+        % Scroll to bottom by triggering a layout update
+        drawnow;
+    end
+
+    function ts = timestamp()
+        ts = char(datetime('now','Format','HH:mm:ss.SSS'));
+    end
+
+    function [Voff, Vscl, Ioff, Iscl] = parseCalib(str)
+        % Parse 4 numbers from space- or comma-separated string
+        nums = str2double(strsplit(strtrim(str), {' ',',','\t'}, 'CollapsedelimitersOnly',true));
+        nums = nums(~isnan(nums));
+        defaults = [1952, 41, 2052, 843];
+        if numel(nums) < 4, nums = [nums, defaults(numel(nums)+1:end)]; end
+        Voff = nums(1); Vscl = nums(2); Ioff = nums(3); Iscl = nums(4);
+    end
+
 end % StimValidationGUI
 
 
 %% ====================================================================
-%  LOCAL HELPER FUNCTIONS
+%  MODULE-LEVEL HELPERS  (no access to GUI state)
 %% ====================================================================
 
 function ports = listArduinoPorts()
-% Return cell array of serial port names likely associated with Arduinos.
     ports = {};
     try
         info = serialportlist('available');
-        % On Windows prefer COM ports; on Mac/Linux prefer /dev/cu.usbmodem etc.
         for k = 1:numel(info)
-            pname = char(info(k));
-            if contains(pname,'COM','IgnoreCase',true) || ...
-               contains(pname,'usbmodem','IgnoreCase',true) || ...
-               contains(pname,'usbserial','IgnoreCase',true)
-                ports{end+1} = pname; %#ok<AGROW>
+            p = char(info(k));
+            if contains(p,'COM','IgnoreCase',true)    || ...
+               contains(p,'usbmodem','IgnoreCase',true) || ...
+               contains(p,'usbserial','IgnoreCase',true)
+                ports{end+1} = p; %#ok<AGROW>
             end
         end
         if isempty(ports)
-            % Fallback: return all available ports
             for k = 1:numel(info)
                 ports{end+1} = char(info(k)); %#ok<AGROW>
             end
@@ -599,63 +646,85 @@ function ports = listArduinoPorts()
     end
 end
 
-% ---------------------------------------------------------------------
+% -----------------------------------------------------------------------
 function rebuilt = rebuildSCommand(originalCmd, patternNumber, newDurationUs)
-% Rebuild a StimJim S command, replacing the pattern slot index with
-% patternNumber and field index 4 (duration_us) with newDurationUs.
-%
-% Format: S<n>,<mode0>,<mode1>,<period_us>,<duration_us>; stages…
-%
-% Returns '' if the command cannot be parsed.
+% Replace slot index (field 1) and duration_us (field 5) in an S command.
+% Everything after the first ";" (stage blocks) is preserved verbatim.
     rebuilt = '';
     semi = strfind(originalCmd,';');
     if isempty(semi), return; end
-
-    header = strtrim(originalCmd(1:semi(1)-1));   % e.g. "S0,0,1,1000,100000"
-    stages = originalCmd(semi(1):end);            % "; 100,-100,100; …"
-
+    header = strtrim(originalCmd(1:semi(1)-1));
+    stages = originalCmd(semi(1):end);
     fields = strsplit(header,',');
     if numel(fields) < 5, return; end
-
-    fields{1} = sprintf('S%d', patternNumber);    % replace slot index
-    fields{5} = sprintf('%d',  newDurationUs);    % replace duration
-
+    fields{1} = sprintf('S%d', patternNumber);
+    fields{5} = sprintf('%d',  newDurationUs);
     rebuilt = [strjoin(fields,','), stages];
 end
 
-% ---------------------------------------------------------------------
-function raw = readLoggerCapture(dlPort)
-% Read the fast-capture stream from the DataLogger after an "m" command.
+% -----------------------------------------------------------------------
+function raw = readLoggerCapture(dlPort, taDL, timestampFn, appendFn)
+% Read fast-capture stream from DataLogger after "m" command.
 %
-% The DataLogger streams lines of comma-separated integers until it sends
-% a blank line or a line starting with "Done" / "End".  Each non-empty
-% line contains one sample: ch1,ch2  (two raw ADC values).
+% DataLogger memory-mode output: one sample per line, 3 comma-separated
+% integers:   time_us, V_raw, I_raw
 %
-% Returns an Nx2 matrix of raw values (double).
-    raw  = [];
-    tEnd = tic;
-    while toc(tEnd) < 10     % 10 s hard timeout
-        if dlPort.NumBytesAvailable > 0 || toc(tEnd) < 0.5
+% Capture ends when either:
+%   (a) a blank line is received, or
+%   (b) a line starting with "Done"/"End" is received, or
+%   (c) NumBytesAvailable stays 0 for >500 ms (data exhausted), or
+%   (d) 15 s hard timeout expires.
+%
+% Returns Nx3 matrix [time_us, V_raw, I_raw].
+    raw     = zeros(0,3);
+    tHard   = tic;
+    tIdle   = tic;
+    IDLE_TIMEOUT = 0.5;   % s of silence to declare capture complete
+    HARD_TIMEOUT = 15.0;
+
+    while toc(tHard) < HARD_TIMEOUT
+        if dlPort.NumBytesAvailable > 0
+            tIdle = tic;   % reset idle timer whenever bytes arrive
             try
-                ln = readline(dlPort);
-                ln = strtrim(ln);
+                ln = strtrim(char(readline(dlPort)));
             catch
                 break;
             end
+
             % Terminal conditions
-            if isempty(ln) || strcmpi(ln,'done') || strcmpi(ln,'end')
+            if isempty(ln)
+                appendFn(taDL, sprintf('[%s] RX: <blank line — capture end>', timestampFn()));
                 break;
             end
-            % Parse sample line
-            vals = str2double(strsplit(ln,','));
-            if numel(vals) >= 2 && ~any(isnan(vals(1:2)))
-                raw(end+1,:) = vals(1:2); %#ok<AGROW>
+            if strncmpi(ln,'Done',4) || strncmpi(ln,'End',3)
+                appendFn(taDL, sprintf('[%s] RX: %s (capture end)', timestampFn(), ln));
+                break;
             end
+
+            % Parse: time_us, V_raw, I_raw
+            vals = str2double(strsplit(ln,','));
+            if numel(vals) >= 3 && ~any(isnan(vals(1:3)))
+                raw(end+1,:) = vals(1:3); %#ok<AGROW>
+            elseif numel(vals) >= 2 && ~any(isnan(vals(1:2)))
+                % Fallback: only 2 values (older firmware without timestamp)
+                raw(end+1,:) = [size(raw,1)*50, vals(1), vals(2)]; %#ok<AGROW>
+            else
+                appendFn(taDL, sprintf('[%s] RX (skip): %s', timestampFn(), ln));
+            end
+
         else
+            % No bytes — check idle timeout
+            if toc(tIdle) > IDLE_TIMEOUT
+                appendFn(taDL, sprintf('[%s] Capture complete (%d points, idle timeout)', ...
+                    timestampFn(), size(raw,1)));
+                break;
+            end
             pause(0.005);
         end
     end
-    if isempty(raw)
-        raw = zeros(0,2);
+
+    if toc(tHard) >= HARD_TIMEOUT
+        appendFn(taDL, sprintf('[%s] WARNING: Hard timeout reached (%d points)', ...
+            timestampFn(), size(raw,1)));
     end
 end
