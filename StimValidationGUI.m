@@ -15,7 +15,7 @@ function StimValidationGUI()
     %% ----------------------------------------------------------------
     %  Constants
     %% ----------------------------------------------------------------
-    STIM_DURATION_US   = 500000;   % override pulse-train duration (us)
+    STIM_DURATION_US   = 2000000;  % override pulse-train duration (us) — 2 s ensures the 100 ms logger capture window always falls within the pulse
     TOTAL_TIME_PER_PAT = 1.0;      % seconds between triggers
     LOGGER_INIT_PAUSE  = 3.0;      % s between logger init commands
     SERIAL_BAUD        = 115200;
@@ -113,8 +113,7 @@ function StimValidationGUI()
     lblCal.Layout.Column = [1 2];
 
     % Row 9 — single calibration text field (space/comma separated)
-    efCalib = uieditfield(lg,'text','Value','1952 41 2052 843',...
-        'Tooltip','Enter: V_offset  V_scale  I_offset  I_scale');
+    efCalib = uieditfield(lg,'text','Value','1952 41 2052 843');
     efCalib.Layout.Row    = 9;
     efCalib.Layout.Column = [1 2];
 
@@ -148,17 +147,15 @@ function StimValidationGUI()
     sjMonPanel.Layout.Row    = 1;
     sjMonPanel.Layout.Column = 1;
     taSJ = uitextarea(sjMonPanel,'Editable','off','Value',{''});
-    taSJ.Position = [2 2 10 10];   % will be resized by SizeChangedFcn
-    sjMonPanel.SizeChangedFcn = @(s,~) set(taSJ,'Position',...
-        [2 2 max(10,s.InnerPosition(3)-4) max(10,s.InnerPosition(4)-4)]);
+    taSJ.Units    = 'normalized';
+    taSJ.Position = [0 0 1 1];
 
     dlMonPanel = uipanel(monGrid,'Title','DataLogger RX');
     dlMonPanel.Layout.Row    = 2;
     dlMonPanel.Layout.Column = 1;
     taDL = uitextarea(dlMonPanel,'Editable','off','Value',{''});
-    taDL.Position = [2 2 10 10];
-    dlMonPanel.SizeChangedFcn = @(s,~) set(taDL,'Position',...
-        [2 2 max(10,s.InnerPosition(3)-4) max(10,s.InnerPosition(4)-4)]);
+    taDL.Units    = 'normalized';
+    taDL.Position = [0 0 1 1];
 
     %% --- RIGHT PANEL --------------------------------------------------
     rightPanel = uipanel(gl,'Title','Results','FontWeight','bold');
@@ -208,9 +205,8 @@ function StimValidationGUI()
     cmdPanel.Layout.Row    = 2;
     cmdPanel.Layout.Column = 1;
     taCmd = uitextarea(cmdPanel,'Editable','off','Value',{'(browse to a settings file)'});
-    taCmd.Position = [2 2 10 10];
-    cmdPanel.SizeChangedFcn = @(s,~) set(taCmd,'Position',...
-        [2 2 max(10,s.InnerPosition(3)-4) max(10,s.InnerPosition(4)-4)]);
+    taCmd.Units    = 'normalized';
+    taCmd.Position = [0 0 1 1];
 
     %% ----------------------------------------------------------------
     %  Initialise port list
@@ -315,7 +311,7 @@ function StimValidationGUI()
         try
             if ~isempty(sjPort) && isvalid(sjPort), delete(sjPort); end
             sjPort = serialport(sjPortName, SERIAL_BAUD, 'Timeout', 5);
-            configureTerminator(sjPort, 'LF');
+            configureTerminator(sjPort, 'CR/LF');
             flush(sjPort);
         catch ME
             uialert(fig, ME.message, 'StimJim port error'); return;
@@ -331,21 +327,35 @@ function StimValidationGUI()
             writeline(sjPort, cmd);
             appendMonitor(taSJ, sprintf('[%s] TX: %s', timestamp(), cmd));
 
-            % Wait up to SJ_ACK_PAUSE seconds, reading all available lines
-            resp = '';
+            % Wait up to SJ_ACK_PAUSE seconds, reading byte-by-byte
+            resp  = '';
+            accum = '';
             t0 = tic;
             while toc(t0) < SJ_ACK_PAUSE
-                pause(0.05);
-                while sjPort.NumBytesAvailable > 0
-                    try
-                        ln = readline(sjPort);
-                        ln = strtrim(char(ln));
-                        if ~isempty(ln)
-                            resp = [resp, ln, ' | ']; %#ok<AGROW>
-                            appendMonitor(taSJ, sprintf('[%s] RX: %s', timestamp(), ln));
+                nb = sjPort.NumBytesAvailable;
+                if nb > 0
+                    bytes = read(sjPort, nb, 'uint8');
+                    for bi = 1:numel(bytes)
+                        ch = char(bytes(bi));
+                        if ch == newline || ch == char(13)   % LF or CR
+                            ln = strtrim(accum);
+                            accum = '';
+                            if ~isempty(ln)
+                                resp = [resp, ln, ' | ']; %#ok<AGROW>
+                                appendMonitor(taSJ, sprintf('[%s] RX: %s', timestamp(), ln));
+                            end
+                        else
+                            accum = [accum, ch]; %#ok<AGROW>
                         end
-                    catch, break; end
+                    end
+                else
+                    pause(0.02);
                 end
+            end
+            % Flush any partial line still in accumulator
+            if ~isempty(strtrim(accum))
+                resp = [resp, strtrim(accum), ' | '];
+                appendMonitor(taSJ, sprintf('[%s] RX: %s', timestamp(), strtrim(accum)));
             end
 
             % StimJim printPulseTrainParameters always prints "mV" and "uA"
@@ -369,7 +379,7 @@ function StimValidationGUI()
         try
             if ~isempty(dlPort) && isvalid(dlPort), delete(dlPort); end
             dlPort = serialport(dlPortName, SERIAL_BAUD, 'Timeout', 10);
-            configureTerminator(dlPort, 'LF');
+            configureTerminator(dlPort, 'CR/LF');
             flush(dlPort);
         catch ME
             uialert(fig, ME.message, 'DataLogger port error'); return;
@@ -385,13 +395,27 @@ function StimValidationGUI()
             writeline(dlPort, loggerInitCmds{ci});
             appendMonitor(taDL, sprintf('[%s] TX: %s', timestamp(), loggerInitCmds{ci}));
             pause(LOGGER_INIT_PAUSE);
-            while dlPort.NumBytesAvailable > 0
-                try
-                    ln = strtrim(char(readline(dlPort)));
-                    if ~isempty(ln)
-                        appendMonitor(taDL, sprintf('[%s] RX: %s', timestamp(), ln));
+            dlAccum = '';
+            t1 = tic;
+            while toc(t1) < 0.5   % drain for 0.5s after pause
+                nb = dlPort.NumBytesAvailable;
+                if nb > 0
+                    bytes = read(dlPort, nb, 'uint8');
+                    for bi = 1:numel(bytes)
+                        ch = char(bytes(bi));
+                        if ch == newline || ch == char(13)
+                            ln = strtrim(dlAccum);
+                            dlAccum = '';
+                            if ~isempty(ln)
+                                appendMonitor(taDL, sprintf('[%s] RX: %s', timestamp(), ln));
+                            end
+                        else
+                            dlAccum = [dlAccum, ch]; %#ok<AGROW>
+                        end
                     end
-                catch, break; end
+                else
+                    pause(0.02);
+                end
             end
             drawnow;
         end
@@ -424,18 +448,24 @@ function StimValidationGUI()
             pNum    = patterns(p).patternNum;
             trigCmd = sprintf('T%d', pNum);
 
-            setStatus(sprintf('Testing pattern %d/%d — sending %s...', p, numel(patterns), trigCmd));
+            setStatus(sprintf('Testing pattern %d/%d - sending %s...', p, numel(patterns), trigCmd));
 
-            % Trigger StimJim
+            % Trigger StimJim first — stimulation begins immediately.
+            % Then send "m" to DataLogger as fast as possible.
+            % "m" starts a fixed 100 ms capture window right away with no
+            % arming delay, so the capture must be issued while the pulse
+            % is still in progress. The serial write itself takes only a
+            % few ms, so the capture window will overlap the pulse as long
+            % as STIM_DURATION_US >> 100 ms. If the pulse is very short,
+            % consider increasing STIM_DURATION_US.
             flush(sjPort);
             writeline(sjPort, trigCmd);
             appendMonitor(taSJ, sprintf('[%s] TX: %s', timestamp(), trigCmd));
 
-            % Small gap then trigger DataLogger memory capture
-            pause(0.02);
+            % Send "m" immediately after — no pause
             flush(dlPort);
             writeline(dlPort, 'm');
-            appendMonitor(taDL, sprintf('[%s] TX: m (capture triggered)', timestamp()));
+            appendMonitor(taDL, sprintf('[%s] TX: m (100 ms capture started)', timestamp()));
 
             % Read capture data (3 cols: time_us, V_raw, I_raw)
             raw = readLoggerCapture(dlPort, taDL, @timestamp, @appendMonitor);
@@ -507,7 +537,7 @@ function StimValidationGUI()
         plot(axV, t_ms, Vcal, 'Color',[0.1 0.3 0.8], 'LineWidth',1.5);
         yline(axV, 0, 'k-', 'LineWidth',0.8);
         xlabel(axV,'Time (ms)'); ylabel(axV,'Voltage (V)');
-        title(axV, sprintf('Pattern %d — Voltage', d.patternNum));
+        title(axV, sprintf('Pattern %d - Voltage', d.patternNum));
         axV.XGrid = 'on'; axV.YGrid = 'on';
 
         % --- Current axes ---
@@ -517,7 +547,7 @@ function StimValidationGUI()
         plot(axI, t_ms, Ical, 'Color',[0.8 0.1 0.1], 'LineWidth',1.5);
         yline(axI, 0, 'k-', 'LineWidth',0.8);
         xlabel(axI,'Time (ms)'); ylabel(axI,'Current (mA)');
-        title(axI, sprintf('Pattern %d — Current', d.patternNum));
+        title(axI, sprintf('Pattern %d - Current', d.patternNum));
         axI.XGrid = 'on'; axI.YGrid = 'on';
 
         drawnow;
@@ -537,32 +567,63 @@ function StimValidationGUI()
 
     % ----------------------------------------------------------------
     function saveFigures(~,~)
-        % Loop through each pattern, call plotPattern to update the
-        % shared axes, then export those axes directly — no duplicate code.
+        % For each pattern: update the live GUI axes (plotPattern), then
+        % render the same data into a hidden regular figure for export.
+        % Uses only saveas(.svg) which works in R2021a and R2025b.
+        % uiaxes cannot be copyobj'd to a figure; we replot from raw data.
         if isempty(resultData)
             uialert(fig,'No data to save.','Empty'); return;
         end
         if ~isfolder(ESTIM_FOLDER), mkdir(ESTIM_FOLDER); end
 
+        [Voff, Vscl, Ioff, Iscl] = parseCalib(efCalib.Value);
+
         for idx = 1:numel(resultData)
-            plotPattern(idx);
+            plotPattern(idx);   % keep live GUI display in sync
             drawnow;
-            pNum = resultData(idx).patternNum;
+
+            d    = resultData(idx);
+            pNum = d.patternNum;
             base = fullfile(ESTIM_FOLDER, ...
                 sprintf('StimValidation_%s_P%d', saveTimestamp, pNum));
 
-            % Export the two live axes into a temporary figure for saving
-            % (exportgraphics on uiaxes writes SVG directly in R2020b+)
-            try
-                exportgraphics(axV, [base '_V.svg']);
-                exportgraphics(axI, [base '_I.svg']);
-            catch
-                % Fallback: copy axes into a regular figure
-                fh = figure('Visible','off','Position',[0 0 900 500]);
-                copyobj([axV axI], fh);
-                saveas(fh, [base '.svg']);
-                close(fh);
+            if isempty(d.rawData) || size(d.rawData,1) < 2
+                setStatus(sprintf('Pattern %d: no data to save', pNum));
+                continue;
             end
+
+            t_ms = (d.rawData(:,1) - d.rawData(1,1)) / 1000;
+            Vcal = (d.rawData(:,2) - Voff) / Vscl;
+            Ical = (d.rawData(:,3) - Ioff) / Iscl;
+            zero = zeros(size(t_ms));
+
+            % Create hidden regular figure - works in all versions
+            fh = figure('Visible','off','Position',[50 50 900 540]);
+
+            axV2 = subplot(2,1,1);
+            hold(axV2,'on');
+            fill(axV2,[t_ms;flipud(t_ms)],[Vcal;flipud(zero)],[0.2 0.5 0.9],...
+                'FaceAlpha',0.3,'EdgeColor','none');
+            plot(axV2,t_ms,Vcal,'Color',[0.1 0.3 0.8],'LineWidth',1.5);
+            yline(axV2,0,'k-','LineWidth',0.8);
+            xlabel(axV2,'Time (ms)'); ylabel(axV2,'Voltage (V)');
+            title(axV2, sprintf('Pattern %d - Voltage', pNum));
+            grid(axV2,'on');
+
+            axI2 = subplot(2,1,2);
+            hold(axI2,'on');
+            fill(axI2,[t_ms;flipud(t_ms)],[Ical;flipud(zero)],[0.9 0.3 0.2],...
+                'FaceAlpha',0.3,'EdgeColor','none');
+            plot(axI2,t_ms,Ical,'Color',[0.8 0.1 0.1],'LineWidth',1.5);
+            yline(axI2,0,'k-','LineWidth',0.8);
+            xlabel(axI2,'Time (ms)'); ylabel(axI2,'Current (mA)');
+            title(axI2, sprintf('Pattern %d - Current', pNum));
+            grid(axI2,'on');
+
+            saveas(fh, [base '.svg']);
+            saveas(fh, [base '.fig']);
+            close(fh);
+
             setStatus(sprintf('Saved graph %d/%d', idx, numel(resultData)));
             drawnow;
         end
@@ -610,7 +671,7 @@ function StimValidationGUI()
 
     function [Voff, Vscl, Ioff, Iscl] = parseCalib(str)
         % Parse 4 numbers from space- or comma-separated string
-        nums = str2double(strsplit(strtrim(str), {' ',',','\t'}, 'CollapsedelimitersOnly',true));
+        nums = str2double(strsplit(strtrim(str), {' ',',','\t'}, 'CollapseDelimiters',true));
         nums = nums(~isnan(nums));
         defaults = [1952, 41, 2052, 843];
         if numel(nums) < 4, nums = [nums, defaults(numel(nums)+1:end)]; end
@@ -666,65 +727,84 @@ end
 function raw = readLoggerCapture(dlPort, taDL, timestampFn, appendFn)
 % Read fast-capture stream from DataLogger after "m" command.
 %
+% Uses byte-level reading to avoid readline() blocking on terminator.
+% Builds lines manually from the byte stream; a line is complete on CR or LF.
+%
 % DataLogger memory-mode output: one sample per line, 3 comma-separated
 % integers:   time_us, V_raw, I_raw
 %
-% Capture ends when either:
-%   (a) a blank line is received, or
+% Capture ends when:
+%   (a) a blank line is received (firmware sends one after the burst), or
 %   (b) a line starting with "Done"/"End" is received, or
-%   (c) NumBytesAvailable stays 0 for >500 ms (data exhausted), or
-%   (d) 15 s hard timeout expires.
+%   (c) no new bytes arrive for IDLE_TIMEOUT seconds (burst exhausted), or
+%   (d) HARD_TIMEOUT seconds elapsed.
 %
 % Returns Nx3 matrix [time_us, V_raw, I_raw].
-    raw     = zeros(0,3);
-    tHard   = tic;
-    tIdle   = tic;
-    IDLE_TIMEOUT = 0.5;   % s of silence to declare capture complete
-    HARD_TIMEOUT = 15.0;
+    raw          = zeros(0,3);
+    accum        = '';          % partial line buffer
+    tHard        = tic;
+    tIdle        = tic;
+    IDLE_TIMEOUT = 1.0;         % s of silence = capture done
+    HARD_TIMEOUT = 15.0;        % s absolute limit
+    done         = false;
+    nLog         = 0;           % lines logged to monitor (limit noise)
+    MAX_LOG      = 10;          % only log first/last few lines to monitor
 
-    while toc(tHard) < HARD_TIMEOUT
-        if dlPort.NumBytesAvailable > 0
-            tIdle = tic;   % reset idle timer whenever bytes arrive
-            try
-                ln = strtrim(char(readline(dlPort)));
-            catch
-                break;
-            end
+    while ~done && toc(tHard) < HARD_TIMEOUT
+        nb = dlPort.NumBytesAvailable;
+        if nb > 0
+            tIdle = tic;                        % reset idle timer
+            bytes = read(dlPort, nb, 'uint8');
+            for bi = 1:numel(bytes)
+                ch = char(bytes(bi));
+                if ch == newline || ch == char(13)   % LF or CR terminates a line
+                    ln = strtrim(accum);
+                    accum = '';
+                    if isempty(ln), continue; end   % skip bare CR before LF
 
-            % Terminal conditions
-            if isempty(ln)
-                appendFn(taDL, sprintf('[%s] RX: <blank line — capture end>', timestampFn()));
-                break;
-            end
-            if strncmpi(ln,'Done',4) || strncmpi(ln,'End',3)
-                appendFn(taDL, sprintf('[%s] RX: %s (capture end)', timestampFn(), ln));
-                break;
-            end
+                    % Log first MAX_LOG and last few lines to monitor
+                    nLog = nLog + 1;
+                    if nLog <= MAX_LOG
+                        appendFn(taDL, sprintf('[%s] RX: %s', timestampFn(), ln));
+                    elseif nLog == MAX_LOG + 1
+                        appendFn(taDL, sprintf('[%s] RX: ... (logging every 100th line)', timestampFn()));
+                    elseif mod(nLog, 100) == 0
+                        appendFn(taDL, sprintf('[%s] RX: %s  (%d pts so far)', timestampFn(), ln, size(raw,1)));
+                    end
 
-            % Parse: time_us, V_raw, I_raw
-            vals = str2double(strsplit(ln,','));
-            if numel(vals) >= 3 && ~any(isnan(vals(1:3)))
-                raw(end+1,:) = vals(1:3); %#ok<AGROW>
-            elseif numel(vals) >= 2 && ~any(isnan(vals(1:2)))
-                % Fallback: only 2 values (older firmware without timestamp)
-                raw(end+1,:) = [size(raw,1)*50, vals(1), vals(2)]; %#ok<AGROW>
-            else
-                appendFn(taDL, sprintf('[%s] RX (skip): %s', timestampFn(), ln));
-            end
+                    % Terminal conditions
+                    if strncmpi(ln,'Done',4) || strncmpi(ln,'End',3)
+                        appendFn(taDL, sprintf('[%s] Capture ended by firmware: %s', timestampFn(), ln));
+                        done = true; break;
+                    end
 
+                    % Parse: time_us, V_raw, I_raw
+                    vals = str2double(strsplit(ln, ','));
+                    if numel(vals) >= 3 && ~any(isnan(vals(1:3)))
+                        raw(end+1,:) = vals(1:3); %#ok<AGROW>
+                    elseif numel(vals) == 2 && ~any(isnan(vals))
+                        % 2-column fallback (no timestamp from firmware)
+                        raw(end+1,:) = [(size(raw,1)) * 50, vals(1), vals(2)]; %#ok<AGROW>
+                    else
+                        appendFn(taDL, sprintf('[%s] RX (skip): %s', timestampFn(), ln));
+                    end
+                else
+                    accum = [accum, ch]; %#ok<AGROW>
+                end
+            end
         else
-            % No bytes — check idle timeout
             if toc(tIdle) > IDLE_TIMEOUT
-                appendFn(taDL, sprintf('[%s] Capture complete (%d points, idle timeout)', ...
+                done = true;
+                appendFn(taDL, sprintf('[%s] Capture complete: %d points (idle timeout)', ...
                     timestampFn(), size(raw,1)));
-                break;
+            else
+                pause(0.005);
             end
-            pause(0.005);
         end
     end
 
     if toc(tHard) >= HARD_TIMEOUT
-        appendFn(taDL, sprintf('[%s] WARNING: Hard timeout reached (%d points)', ...
+        appendFn(taDL, sprintf('[%s] WARNING: Hard timeout - %d points captured', ...
             timestampFn(), size(raw,1)));
     end
 end
